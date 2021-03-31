@@ -1,6 +1,7 @@
 package scp
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -19,9 +20,10 @@ var (
 	DefaultDirPerm = os.FileMode(0755)
 
 	// Indicate a non-nil TransferOption should be provided
-	ErrNoTransferOption = errors.New("TransferOption is not provided")
+	ErrNoTransferOption = errors.New("scp: TransferOption is not provided")
 
-	// The num of pre-read files/directories for transferring a directory.
+	// The num of pre-read files/directories for recursively transferring a directory.
+	// Set it larger may speedup the transfer with lots of small files.
 	// Do not set it too large or you will exceed the max open files limit.
 	DirectoryPreReads = 10
 )
@@ -133,7 +135,7 @@ func (c *Client) CopyToRemote(reader io.Reader, remoteTarget string, opt *FileTr
 	}
 
 	finished := make(chan struct{})
-	go c.sendToRemote(job, stream, finished, reusableErrCh)
+	go c.sendToRemote(nil, job, stream, finished, reusableErrCh)
 
 	stopFn, timer := setupTimeout(opt.Timeout)
 	select {
@@ -144,7 +146,7 @@ func (c *Client) CopyToRemote(reader io.Reader, remoteTarget string, opt *FileTr
 		return fmt.Errorf("scp: %v", err)
 	case <-finished:
 		stopFn()
-		c.sendToRemote(exitJob, stream, nil, reusableErrCh)
+		c.sendToRemote(nil, exitJob, stream, nil, reusableErrCh)
 	}
 
 	return nil
@@ -182,9 +184,10 @@ func (c *Client) CopyDirToRemote(localDir string, remoteDir string, opt *DirTran
 	defer session.Close()
 	defer stream.Close()
 
-	jobCh := traverse(dir, opt, reusableErrCh)
+	cancelSend, jobCh := traverse(dir, opt, reusableErrCh)
+	defer cancelSend() // ensure no goroutine leak
 	finished := make(chan struct{})
-	go c.sendToRemote(jobCh, stream, finished, reusableErrCh)
+	go c.sendToRemote(cancelSend, jobCh, stream, finished, reusableErrCh)
 
 	stopFn, timer := setupTimeout(opt.Timeout)
 	select {
@@ -204,31 +207,47 @@ func (c *Client) CopyDirToRemote(localDir string, remoteDir string, opt *DirTran
 // traverse iterates files and directories of fd in specific order.
 // Return a chan for jobs.
 // The fd will be automatically closed after read.
-func traverse(fd *os.File, opt *DirTransferOption, errCh chan error) <-chan transferJob {
+func traverse(fd *os.File, opt *DirTransferOption, errCh chan error) (context.CancelFunc, <-chan transferJob) {
 	jobCh := make(chan transferJob, DirectoryPreReads)
 
-	go traverseDir(true, fd, opt, jobCh, errCh)
+	ctx, cancel := context.WithCancel(context.TODO())
+	go traverseDir(ctx, true, fd, opt, jobCh, errCh)
 
-	return jobCh
+	return cancel, jobCh
 }
 
-func traverseDir(rootDir bool, dir *os.File, opt *DirTransferOption, jobCh chan transferJob, errCh chan error) {
-	curDirStat, err := dir.Stat()
-	if err != nil {
-		errCh <- fmt.Errorf("error getting dir stat: %v", err)
-		return
+func traverseDir(ctx context.Context, rootDir bool, dir *os.File, opt *DirTransferOption, jobCh chan transferJob, errCh chan error) {
+	if rootDir {
+		defer close(jobCh)
 	}
-	deliverDir(curDirStat, opt, jobCh)
 
-	list, err := dir.Readdir(-1)
-	_ = dir.Close()
-	if err != nil {
-		errCh <- fmt.Errorf("error traverse dir: %v", err)
+	readFn := func() ([]os.FileInfo, os.FileInfo) {
+		defer dir.Close()
+
+		curDirStat, err := dir.Stat()
+		if err != nil {
+			errCh <- fmt.Errorf("error getting dir stat: %v", err)
+			return nil, nil
+		}
+		list, err := dir.Readdir(-1)
+		if err != nil {
+			errCh <- fmt.Errorf("error traverse dir: %v", err)
+			return nil, nil
+		}
+		return list, curDirStat
+	}
+	list, curDirStat := readFn()
+	if list == nil || curDirStat == nil {
 		return
 	}
+
+	deliverDir(ctx, curDirStat, opt, jobCh)
 
 	var subDirs []os.FileInfo
 	for i := range list {
+		if ctx.Err() != nil {
+			return
+		}
 		fStat := list[i]
 		// transfer files first
 		if !fStat.IsDir() {
@@ -237,7 +256,7 @@ func traverseDir(rootDir bool, dir *os.File, opt *DirTransferOption, jobCh chan 
 				errCh <- fmt.Errorf("error opening file: %v", err)
 				return
 			}
-			deliverFile(fd, fStat, opt, jobCh)
+			deliverFile(ctx, fd, fStat, opt, jobCh)
 		} else {
 			subDirs = append(subDirs, fStat)
 		}
@@ -245,6 +264,9 @@ func traverseDir(rootDir bool, dir *os.File, opt *DirTransferOption, jobCh chan 
 
 	// traverse sub dirs
 	for i := range subDirs {
+		if ctx.Err() != nil {
+			return
+		}
 		dirStat := subDirs[i]
 		fd, err := os.Open(filepath.Join(dir.Name(), dirStat.Name()))
 		if err != nil {
@@ -252,19 +274,20 @@ func traverseDir(rootDir bool, dir *os.File, opt *DirTransferOption, jobCh chan 
 			return
 		}
 		// recursively transfer the dirs
-		traverseDir(false, fd, opt, jobCh, errCh)
+		traverseDir(ctx, false, fd, opt, jobCh, errCh)
 	}
 
-	// exit current directory
-	jobCh <- exitJob
-
-	if rootDir {
-		close(jobCh)
+	select {
+	case jobCh <- exitJob:
+		// exit current directory
+	case <-ctx.Done():
+		return
 	}
+
 }
 
 // deliver a directory transfer
-func deliverDir(stat os.FileInfo, opt *DirTransferOption, jobCh chan transferJob) {
+func deliverDir(ctx context.Context, stat os.FileInfo, opt *DirTransferOption, jobCh chan transferJob) {
 	j := transferJob{
 		Type:        directory,
 		Destination: stat.Name(),
@@ -278,12 +301,18 @@ func deliverDir(stat os.FileInfo, opt *DirTransferOption, jobCh chan transferJob
 		mt, at := stat.ModTime(), time.Now()
 		j.ModifiedTime, j.AccessTime = &mt, &at
 	}
-	jobCh <- j
+
+	select {
+	case jobCh <- j:
+		// queue the dir job
+	case <-ctx.Done():
+		return
+	}
 }
 
 // deliver a file transfer job.
 // close the fd automatically.
-func deliverFile(fd *os.File, stat os.FileInfo, opt *DirTransferOption, jobCh chan transferJob) {
+func deliverFile(ctx context.Context, fd *os.File, stat os.FileInfo, opt *DirTransferOption, jobCh chan transferJob) {
 	j := transferJob{
 		Type:        file,
 		Size:        stat.Size(),
@@ -297,7 +326,12 @@ func deliverFile(fd *os.File, stat os.FileInfo, opt *DirTransferOption, jobCh ch
 		mt, at := stat.ModTime(), time.Now()
 		j.ModifiedTime, j.AccessTime = &mt, &at
 	}
-	jobCh <- j
+	select {
+	case jobCh <- j:
+		// queue the file job
+	case <-ctx.Done():
+		return
+	}
 }
 
 // helper func to setup a timeout timer.

@@ -11,7 +11,7 @@ import (
 
 var (
 	// Indicate a non-nil ClientOption should be provided
-	ErrNoClientOption = errors.New("ClientOption is not provided")
+	ErrNoClientOption = errors.New("scp: ClientOption is not provided")
 )
 
 // Client has the "golang.org/x/crypto/ssh/Client" embedded,

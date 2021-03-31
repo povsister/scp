@@ -2,6 +2,7 @@ package scp
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -111,9 +112,27 @@ var (
 )
 
 // it accepts a single "transferJob" or "<-chan transferJob"
-func (c *Client) sendToRemote(jobs interface{}, stream *sessionStream, finished chan<- struct{}, errCh chan<- error) {
+func (c *Client) sendToRemote(cancel context.CancelFunc, jobs interface{}, stream *sessionStream, finished chan<- struct{}, errCh chan<- error) {
 	defer func() {
 		if r := recover(); r != nil {
+			if cancel != nil {
+				// cancel the traverse goroutine on error
+				cancel()
+			}
+			// empty the chan and close the fd in buffer
+			if jobCh, ok := jobs.(<-chan transferJob); ok {
+				for {
+					j, ok := <-jobCh
+					if !ok {
+						break
+					}
+					if j.close && j.Reader != nil {
+						if rc, ok := j.Reader.(io.ReadCloser); ok {
+							_ = rc.Close()
+						}
+					}
+				}
+			}
 			errCh <- fmt.Errorf("%v", r)
 		}
 	}()
