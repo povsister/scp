@@ -1,6 +1,119 @@
 # Secure Copy Protocol implemented in Go
 
-TODO
+[![GoReport Widget]][GoReport]
+[![GoPkg Widget]][GoPkg]
+
+[Secure Copy Protocol][SCP Wiki] (aka: SCP) uses Secure Shell (SSH) to transfer files between host on a network.
+
+There is no RFC that defines the specifics of the protocol.
+This package simply implements SCP against the [OpenSSH][OpenSSH]'s `scp` tool, 
+thus you can directly transfer files to/from *uinx system within your Go code, 
+as long as the remote host has OpenSSH installed.
+
+## Features
+* Copy file from local to remote.
+* Copy from buffer to remote file. (e.g: copy from `bytes.Reader`)
+* Recursively copy directory from local to remote.
+* Set the permission bits for transferred files/directories.
+* Set the timeout for transfer.
+* Preserve the permission bits and modification time at transfer.
+* TODO:
+  * Copy file from remote to local file/buffer.
+  * Recursively copy remote directory to local.
+  * Transfer speed limit.
+  * Performance benchmark for lots of small files.
+* Won't support:
+  * Copy file from remote to remote.
+
+## Install
+```go
+go get github.com/povsister/scp
+```
+
+## Example usage
+
+This package leverages `golang.org/x/crypto/ssh` to establish a SSH connection to remote host.
+
+*Error handling are omitted in examples!*
+
+### Copy a file to remote
+```go
+// Build a SSH config from username/password
+sshConf := scp.NewSSHConfigFromPassword("username", "password")
+
+// Build a SSH config from private key
+privPEM, err := ioutil.ReadFile("/path/to/privateKey")
+// without passphrase
+sshConf := scp.NewSSHConfigFromPrivateKey("username", privPEM)
+// with passphrase
+sshConf := scp.NewSSHConfigFromPrivateKey("username", privPEM, passphrase)
+
+// Dial SSH to "my.server.com:22".
+// If your SSH server does not listen on 22, simply suffix the address with port.
+// e.g: "my.server.com:1234"
+scpClient, err := scp.NewClient("my.server.com", sshConf, &scp.ClientOption{})
+
+// Build a SCP client based on existing "golang.org/x/crypto/ssh.Client"
+scpClient, err := scp.NewClientFromExistingSSH(existingSSHClient, &scp.ClientOption{})
+
+defer scpClient.Close()
 
 
+// Do the file copy
+err = scpClient.CopyFileToRemote("/path/to/local/file", "/path/at/remote", &scp.FileTransferOption{})
 
+// Do the file copy with timeout and file properties preserved
+fo := &scp.FileTransferOption{
+    Timeout: 30 * time.Second, 
+    PreserveProp: true,
+}
+err = scpClient.CopyFileToRemote("/path/to/local/file", "/path/at/remote", fo)
+```
+
+### Copy from buffer to remote as a file
+```go
+// From buffer
+buffer := []byte("something excited")
+reader := bytes.NewReader(buffer)
+
+// From fd
+// Note that its YOUR responsibility to CLOSE the fd after transfer.
+reader, err := os.Open("/path/to/local/file")
+defer reader.Close()
+
+
+// Note that the reader must implement "KnownSize" interface except os.File
+// For the content length must be provided before transfer.
+err := scpClient.CopyToRemote(reader, "/path/to/remote/file", &scp.FileTransferOption{})
+```
+
+### Recursively copy a directory to remote
+```go
+// recursively copy to remote
+err := scpClient.CopyDirToRemote("/path/to/local/dir", "/path/to/remote/dir", &scp.DirTransferOption{})
+
+// recursively copy to remote with timeout and file properties
+do := &scp.DirTransferOption{
+    Timeout: 10 * time.Minute,
+    PreserveProp: true,
+}
+err:= scpClient.CopyDirToRemote("/path/to/local/dir", "/path/to/remote/dir", do)
+```
+
+## Some advice
+`SCP` is a light-weighted protocol which implements file transfer only. It does not support 
+advanced features like: directory listing, resume from break-point.
+
+So, it's commonly used for transferring some small-size, temporary files. If you heavily 
+depend on the file transfer, you may consider using `SFTP` instead.
+
+## License
+[MIT License][MIT License]
+
+[MIT License]: https://en.wikipedia.org/wiki/MIT_License
+[OpenSSH]: https://www.openssh.com
+[SCP Wiki]: https://en.wikipedia.org/wiki/Secure_copy_protocol
+[GoPkg]: https://pkg.go.dev/github.com/povsister/scp
+[GoPkg Widget]: https://pkg.go.dev/badge/github.com/povsister/scp.svg
+[GoReport]: https://goreportcard.com/report/povsister/scp
+[GoReport Widget]: https://goreportcard.com/badge/povsister/scp
