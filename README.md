@@ -3,7 +3,12 @@
 [![GoReport Widget]][GoReport]
 [![GoPkg Widget]][GoPkg]
 
-[Secure Copy Protocol][SCP Wiki] (aka: SCP) uses Secure Shell (SSH) to 
+## Overview
+Production-ready Secure Copy Protocol (aka: SCP) implemented in Go with 
+well documentation and neat dependency. 
+
+## Introduction
+[Secure Copy Protocol][SCP Wiki] uses Secure Shell (SSH) to 
 transfer files between host on a network.
 
 There is no RFC that defines the specifics of the protocol.
