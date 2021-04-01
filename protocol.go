@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"reflect"
 	"strings"
 	"time"
 
@@ -137,14 +136,12 @@ func (c *Client) sendToRemote(cancel context.CancelFunc, jobs interface{}, strea
 		}
 	}()
 
-	switch reflect.ValueOf(jobs).Kind() {
-	case reflect.Struct:
-		j := jobs.(transferJob)
-		handleTransferJob(&j, stream)
-	case reflect.Chan:
-		jobCh := jobs.(<-chan transferJob)
+	switch js := jobs.(type) {
+	case transferJob:
+		handleTransferJob(&js, stream)
+	case <-chan transferJob:
 		for {
-			j, ok := <-jobCh
+			j, ok := <-js
 			if !ok {
 				// jobCh closed
 				break
