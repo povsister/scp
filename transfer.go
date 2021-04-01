@@ -59,6 +59,7 @@ type KnownSize interface {
 }
 
 // CopyFileToRemote copies a local file to remote location.
+// It will automatically close the file after read.
 func (c *Client) CopyFileToRemote(file string, remoteLoc string, opt *FileTransferOption) error {
 	if opt == nil {
 		return ErrNoTransferOption
@@ -68,6 +69,7 @@ func (c *Client) CopyFileToRemote(file string, remoteLoc string, opt *FileTransf
 	if err != nil {
 		return fmt.Errorf("scp: %v", err)
 	}
+	defer f.Close()
 
 	return c.CopyToRemote(f, remoteLoc, opt)
 }

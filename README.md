@@ -18,6 +18,8 @@ as long as the remote host has OpenSSH installed.
 * Set permission bits for transferred files.
 * Set timeout/context for transfer.
 * Preserve the permission bits and modification time at transfer.
+* No resources leak. (e.g: goroutine, file descriptor)
+* Low memory consuming for transferring huge files.
 * TODO:
   * Copy file from remote to local file/buffer.
   * Recursively copy remote directory to local.
