@@ -199,7 +199,6 @@ func handleTransferJob(j *transferJob, stream *sessionStream) {
 		checkResponse(stream)
 
 	case exit:
-		// size is always 0 for directory
 		_, err := fmt.Fprintf(stream.In, "E\n")
 		if err != nil {
 			panicf("error sending signal E: %s", err)

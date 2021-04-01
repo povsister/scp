@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	// Indicate a non-nil ClientOption should be provided
+	// ErrNoClientOption indicates a non-nil ClientOption should be provided
 	ErrNoClientOption = errors.New("scp: ClientOption is not provided")
 )
 

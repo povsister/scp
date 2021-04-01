@@ -3,7 +3,8 @@
 [![GoReport Widget]][GoReport]
 [![GoPkg Widget]][GoPkg]
 
-[Secure Copy Protocol][SCP Wiki] (aka: SCP) uses Secure Shell (SSH) to transfer files between host on a network.
+[Secure Copy Protocol][SCP Wiki] (aka: SCP) uses Secure Shell (SSH) to 
+transfer files between host on a network.
 
 There is no RFC that defines the specifics of the protocol.
 This package simply implements SCP against the [OpenSSH][OpenSSH]'s `scp` tool, 
@@ -14,14 +15,14 @@ as long as the remote host has OpenSSH installed.
 * Copy file from local to remote.
 * Copy from buffer to remote file. (e.g: copy from `bytes.Reader`)
 * Recursively copy directory from local to remote.
-* Set the permission bits for transferred files/directories.
-* Set the timeout for transfer.
+* Set permission bits for transferred files.
+* Set timeout/context for transfer.
 * Preserve the permission bits and modification time at transfer.
 * TODO:
   * Copy file from remote to local file/buffer.
   * Recursively copy remote directory to local.
   * Transfer speed limit.
-  * Performance benchmark for lots of small files.
+  * Performance benchmark/optimization for lots of small files.
 * Won't support:
   * Copy file from remote to remote.
 
@@ -44,9 +45,9 @@ sshConf := scp.NewSSHConfigFromPassword("username", "password")
 // Build a SSH config from private key
 privPEM, err := ioutil.ReadFile("/path/to/privateKey")
 // without passphrase
-sshConf := scp.NewSSHConfigFromPrivateKey("username", privPEM)
+sshConf, err := scp.NewSSHConfigFromPrivateKey("username", privPEM)
 // with passphrase
-sshConf := scp.NewSSHConfigFromPrivateKey("username", privPEM, passphrase)
+sshConf, err := scp.NewSSHConfigFromPrivateKey("username", privPEM, passphrase)
 
 // Dial SSH to "my.server.com:22".
 // If your SSH server does not listen on 22, simply suffix the address with port.
@@ -59,11 +60,13 @@ scpClient, err := scp.NewClientFromExistingSSH(existingSSHClient, &scp.ClientOpt
 defer scpClient.Close()
 
 
-// Do the file copy
+// Do the file transfer without timeout/context
 err = scpClient.CopyFileToRemote("/path/to/local/file", "/path/at/remote", &scp.FileTransferOption{})
 
-// Do the file copy with timeout and file properties preserved
+// Do the file copy with timeout, context and file properties preserved.
+// Note that the context and timeout will both take effect.
 fo := &scp.FileTransferOption{
+    Context: yourCotext,
     Timeout: 30 * time.Second, 
     PreserveProp: true,
 }
@@ -84,6 +87,7 @@ defer reader.Close()
 
 // Note that the reader must implement "KnownSize" interface except os.File
 // For the content length must be provided before transfer.
+// The last part of remote location will be used as file name at remote.
 err := scpClient.CopyToRemote(reader, "/path/to/remote/file", &scp.FileTransferOption{})
 ```
 
@@ -92,20 +96,26 @@ err := scpClient.CopyToRemote(reader, "/path/to/remote/file", &scp.FileTransferO
 // recursively copy to remote
 err := scpClient.CopyDirToRemote("/path/to/local/dir", "/path/to/remote/dir", &scp.DirTransferOption{})
 
-// recursively copy to remote with timeout and file properties
+// recursively copy to remote with timeout, context and file properties.
+// Note that the context and timeout will both take effect.
 do := &scp.DirTransferOption{
+    Context: yourContext,
     Timeout: 10 * time.Minute,
     PreserveProp: true,
 }
 err:= scpClient.CopyDirToRemote("/path/to/local/dir", "/path/to/remote/dir", do)
 ```
 
-## Some advice
+## Something you need to know
 `SCP` is a light-weighted protocol which implements file transfer only. It does not support 
 advanced features like: directory listing, resume from break-point.
 
 So, it's commonly used for transferring some small-size, temporary files. If you heavily 
 depend on the file transfer, you may consider using `SFTP` instead.
+
+Another thing you may notice is that I didn't put `context.Context` as the first argument in
+function signature. Instead, it's located in `TransferOption`. This is intentional because it
+makes the API also light-weighted.
 
 ## License
 [MIT License][MIT License]

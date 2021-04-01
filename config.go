@@ -6,8 +6,8 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// The default timeout for establishing a TCP connection to server
-const DefaultConnTimeout = 3 * time.Second
+// defaultConnTimeout is the default timeout for establishing a TCP connection to server
+const defaultConnTimeout = 3 * time.Second
 
 // NewSSHConfigFromPassword returns a *ssh.ClientConfig with ssh.Password AuthMethod
 // and 3 seconds timeout for connecting the server.
@@ -20,7 +20,7 @@ func NewSSHConfigFromPassword(username, password string) *ssh.ClientConfig {
 			ssh.Password(password),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         DefaultConnTimeout,
+		Timeout:         defaultConnTimeout,
 	}
 }
 
@@ -51,7 +51,7 @@ func NewSSHConfigFromPrivateKey(username string, privPEM []byte, passphrase ...s
 			ssh.PublicKeys(priv),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         DefaultConnTimeout,
+		Timeout:         defaultConnTimeout,
 	}
 	return
 }
