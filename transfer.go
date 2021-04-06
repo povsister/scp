@@ -60,12 +60,12 @@ type KnownSize interface {
 
 // CopyFileToRemote copies a local file to remote location.
 // It will automatically close the file after read.
-func (c *Client) CopyFileToRemote(file string, remoteLoc string, opt *FileTransferOption) error {
+func (c *Client) CopyFileToRemote(localFile string, remoteLoc string, opt *FileTransferOption) error {
 	if opt == nil {
 		return ErrNoTransferOption
 	}
 
-	f, err := os.Open(file)
+	f, err := os.Open(localFile)
 	if err != nil {
 		return fmt.Errorf("scp: %v", err)
 	}
@@ -124,7 +124,7 @@ func (c *Client) CopyToRemote(reader io.Reader, remoteTarget string, opt *FileTr
 		}
 	}
 
-	session, stream, reusableErrCh, err := c.prepareTransfer(false, scpLocalToRemote, remotePath)
+	session, stream, reusableErrCh, err := c.prepareTransfer(remoteServerOption{Mode: scpLocalToRemote}, remotePath)
 	if err != nil {
 		return err
 	}
@@ -192,7 +192,11 @@ func (c *Client) CopyDirToRemote(localDir string, remoteDir string, opt *DirTran
 		return fmt.Errorf("scp: error opening local dir: %v", err)
 	}
 
-	session, stream, reusableErrCh, err := c.prepareTransfer(true, scpLocalToRemote, remoteDir)
+	o := remoteServerOption{
+		Mode:      scpLocalToRemote,
+		Recursive: true,
+	}
+	session, stream, reusableErrCh, err := c.prepareTransfer(o, remoteDir)
 	if err != nil {
 		return err
 	}
@@ -377,7 +381,7 @@ func setupContext(ctx context.Context) <-chan struct{} {
 }
 
 // prepare for the transfer. Including setup session/stream and run remote scp command
-func (c *Client) prepareTransfer(recursive bool, mode scpServerMode, remotePath string) (*ssh.Session, *sessionStream, chan error, error) {
+func (c *Client) prepareTransfer(o remoteServerOption, remotePath string) (*ssh.Session, *sessionStream, chan error, error) {
 	session, stream, err := c.sessionAndStream()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("scp: error creating ssh session %v", err)
@@ -386,17 +390,169 @@ func (c *Client) prepareTransfer(recursive bool, mode scpServerMode, remotePath 
 	errCh := make(chan error, 3)
 	serverReady := make(chan struct{})
 
-	go c.launchScpServerOnRemote(recursive, mode, session, remotePath, serverReady, errCh)
+	go c.launchScpServerOnRemote(o, session, remotePath, serverReady, errCh)
 
 	t := time.NewTimer(10 * time.Second)
+	defer t.Stop()
 	select {
 	case <-t.C:
 		return nil, nil, nil, fmt.Errorf("scp: timeout starting remote scp server")
 	case err = <-errCh:
 		return nil, nil, nil, fmt.Errorf("scp: %v", err)
 	case <-serverReady:
-		t.Stop()
 	}
 
 	return session, stream, errCh, nil
+}
+
+// CopyFromRemote copies a remote file into buffer.
+//
+// Note that "PreserveProp" and "Perm" option does not take effect in this case.
+func (c *Client) CopyFromRemote(remoteFile string, buffer io.Writer, opt *FileTransferOption) error {
+	if opt == nil {
+		return ErrNoTransferOption
+	}
+
+	if buffer == nil {
+		return fmt.Errorf("scp: buffer can not be nil")
+	}
+
+	return c.copyFromRemote(remoteFile, "", buffer, opt)
+}
+
+func (c *Client) copyFromRemote(remoteFile, localFile string, lw io.Writer, opt *FileTransferOption) error {
+	o := remoteServerOption{
+		Mode:     scpRemoteToLocal,
+		Preserve: opt.PreserveProp,
+	}
+	session, stream, reusableErrCh, err := c.prepareTransfer(o, remoteFile)
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	defer stream.Close()
+
+	finished := make(chan struct{})
+	j := receiveJob{
+		Type:   file,
+		Path:   localFile,
+		Writer: lw,
+		Perm:   opt.Perm,
+		close:  len(localFile) != 0,
+	}
+	go c.receiveFromRemote(j, stream, finished, reusableErrCh)
+
+	stopFn, timer := setupTimeout(opt.Timeout)
+	defer stopFn()
+
+	select {
+	case <-setupContext(opt.Context):
+		return opt.Context.Err()
+	case <-timer:
+		return fmt.Errorf("scp: timeout receiving file from remote")
+	case err = <-reusableErrCh:
+		return fmt.Errorf("scp: %v", err)
+	case <-finished:
+		// do nothing
+	}
+	return nil
+}
+
+// CopyFileFromRemote copies a remoteFile as localFile.
+//
+// If localFile does not exist, it will be automatically created.
+// If localFile already exists, it will be truncated for writing.
+// If localFile is a directory, the name of remoteFile will be used.
+//
+// For example:
+//   - CopyFileFromRemote("/remote/file1", "/local/fileNotExist", &FileTransferOption)
+//     - Result: "/remote/file1" -> "/local/file2"
+//       The "fileNotExist" will be created.
+//
+//   - CopyFileFromRemote("/remote/file1", "/local/fileExist", &FileTransferOption)
+//     - Result: "/remote/file1" -> "/local/fileExist"
+//       The "fileExist" will be truncated for writing.
+//
+//   - CopyFileFromRemote("/remote/file1", "/local/dir", &FileTransferOption)
+//     - Result: "/remote/file1" -> "/local/dir/file1"
+//       The "file1" will be used as filename and stored under "/local/dir" directory.
+//       Note that "/local/dir" must exist in this case.
+func (c *Client) CopyFileFromRemote(remoteFile, localFile string, opt *FileTransferOption) error {
+	if opt == nil {
+		return ErrNoTransferOption
+	}
+
+	remoteFilename := filepath.Base(remoteFile)
+
+	if stat, err := os.Stat(localFile); err != nil {
+		if pStat, err := os.Stat(filepath.Dir(localFile)); err != nil {
+			return fmt.Errorf("scp: %s", err)
+		} else {
+			if !pStat.IsDir() {
+				return fmt.Errorf("scp: %s no such file or directory", localFile)
+			}
+		}
+	} else {
+		if stat.IsDir() {
+			localFile = filepath.Join(localFile, remoteFilename)
+		}
+	}
+
+	return c.copyFromRemote(remoteFile, localFile, nil, opt)
+}
+
+// CopyDirFromRemote recursively copies a remote directory into local directory.
+// The localDir must exist before copying.
+//
+//
+// For example:
+//   - CopyDirFromRemote("/remote/dir1", "/local/dir2", &DirTransferOption{})
+//     - Results: "remote/dir1" -> "/local/dir2/dir1"
+func (c *Client) CopyDirFromRemote(remoteDir, localDir string, opt *DirTransferOption) error {
+	if opt == nil {
+		return ErrNoTransferOption
+	}
+
+	if stat, err := os.Stat(localDir); err != nil {
+		return fmt.Errorf("scp: %s", err)
+	} else {
+		if !stat.IsDir() {
+			return fmt.Errorf("scp: %s is not a directory", localDir)
+		}
+	}
+
+	o := remoteServerOption{
+		Mode:      scpRemoteToLocal,
+		Recursive: true,
+		Preserve:  opt.PreserveProp,
+	}
+	session, stream, reusableErrCh, err := c.prepareTransfer(o, remoteDir)
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	defer stream.Close()
+
+	finished := make(chan struct{})
+	j := receiveJob{
+		Type: directory,
+		Path: localDir,
+	}
+	go c.receiveFromRemote(j, stream, finished, reusableErrCh)
+
+	stopFn, timer := setupTimeout(opt.Timeout)
+	defer stopFn()
+
+	select {
+	case <-setupContext(opt.Context):
+		return opt.Context.Err()
+	case <-timer:
+		return fmt.Errorf("scp: timeout receiving directory from remote")
+	case err = <-reusableErrCh:
+		return fmt.Errorf("scp: %v", err)
+	case <-finished:
+		// do nothing
+	}
+
+	return nil
 }
