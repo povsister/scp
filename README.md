@@ -18,16 +18,17 @@ as long as the remote host has OpenSSH installed.
 
 ## Features
 * Copy file from local to remote.
+* Copy file from remote to local.
 * Copy from buffer to remote file. (e.g: copy from `bytes.Reader`)
+* Copy from remote file to buffer. (e.g: copy to `os.Stdout`)
 * Recursively copy directory from local to remote.
+* Recursively copy directory from remote to local.
 * Set permission bits for transferred files.
 * Set timeout/context for transfer.
 * Preserve the permission bits and modification time at transfer.
 * No resources leak. (e.g: goroutine, file descriptor)
 * Low memory consuming for transferring huge files.
 * TODO:
-  * Copy file from remote to local file/buffer.
-  * Recursively copy remote directory to local.
   * Transfer speed limit.
   * Performance benchmark/optimization for lots of small files.
 * Won't support:
@@ -80,6 +81,15 @@ fo := &scp.FileTransferOption{
 err = scpClient.CopyFileToRemote("/path/to/local/file", "/path/at/remote", fo)
 ```
 
+### Copy a file from remote
+```go
+// Copy the file from remote and save it as "/path/to/local/file".
+err = scpClient.CopyFileFromRemote("/path/to/remote/file", "/path/to/local/file", &scp.FileTransferOption{})
+
+// Copy the remote file and print it in Stdout.
+err = scpClient.CopyFromRemote("/path/to/remote/file", os.Stdout, &scp.FileTransferOption{})
+```
+
 ### Copy from buffer to remote as a file
 ```go
 // From buffer
@@ -111,6 +121,13 @@ do := &scp.DirTransferOption{
     PreserveProp: true,
 }
 err:= scpClient.CopyDirToRemote("/path/to/local/dir", "/path/to/remote/dir", do)
+```
+
+### Recursively copy a directory from remote
+```go
+// recursively copy from remote.
+// The remote dir will be save under "/path/to/local".
+err := scpClient.CopyDirFromRemote("/path/to/remote/dir", "/path/to/local", &scp.DirTransferOption{})
 ```
 
 ## Something you need to know
