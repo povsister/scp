@@ -119,7 +119,7 @@ const (
 	exit transferType = "exit"
 )
 
-type transferJob struct {
+type sendJob struct {
 	Type         transferType
 	Size         int64
 	Reader       io.Reader // the content reader
@@ -132,10 +132,10 @@ type transferJob struct {
 
 var (
 	// represent a "E" signal
-	exitJob = transferJob{Type: exit}
+	exitJob = sendJob{Type: exit}
 )
 
-// it accepts a single "transferJob" or "<-chan transferJob"
+// it accepts a single "sendJob" or "<-chan sendJob"
 func (c *Client) sendToRemote(cancel context.CancelFunc, jobs interface{}, stream *sessionStream, finished chan<- struct{}, errCh chan<- error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -144,7 +144,7 @@ func (c *Client) sendToRemote(cancel context.CancelFunc, jobs interface{}, strea
 				cancel()
 			}
 			// empty the chan and close the fd in buffer
-			if jobCh, ok := jobs.(<-chan transferJob); ok {
+			if jobCh, ok := jobs.(<-chan sendJob); ok {
 				for {
 					j, ok := <-jobCh
 					if !ok {
@@ -164,11 +164,11 @@ func (c *Client) sendToRemote(cancel context.CancelFunc, jobs interface{}, strea
 	setupDebug(stream.ErrOut)
 
 	switch js := jobs.(type) {
-	case transferJob:
+	case sendJob:
 		checkResponse(stream)
-		handleTransferJob(&js, stream)
-	case <-chan transferJob:
-		// check the first OK response
+		handleSend(js, stream)
+	case <-chan sendJob:
+		// confirm the first OK response
 		checkResponse(stream)
 		for {
 			j, ok := <-js
@@ -176,7 +176,7 @@ func (c *Client) sendToRemote(cancel context.CancelFunc, jobs interface{}, strea
 				// jobCh closed
 				break
 			}
-			handleTransferJob(&j, stream)
+			handleSend(j, stream)
 		}
 	default:
 		panicf("programmer error: unknown type %T", jobs)
@@ -187,7 +187,7 @@ func (c *Client) sendToRemote(cancel context.CancelFunc, jobs interface{}, strea
 	}
 }
 
-func handleTransferJob(j *transferJob, stream *sessionStream) {
+func handleSend(j sendJob, stream *sessionStream) {
 	switch j.Type {
 	case file:
 		// close if required
@@ -239,7 +239,7 @@ func handleTransferJob(j *transferJob, stream *sessionStream) {
 	}
 }
 
-func sendTimestamp(j *transferJob, stream *sessionStream) {
+func sendTimestamp(j sendJob, stream *sessionStream) {
 	_, err := fmt.Fprintf(stream.In, "T%d 0 %d 0\n", j.ModifiedTime.Unix(), j.AccessTime.Unix())
 	if err != nil {
 		panicf("error sending signal T: %s", err)
@@ -248,6 +248,9 @@ func sendTimestamp(j *transferJob, stream *sessionStream) {
 }
 
 func setupDebug(errReader io.Reader) {
+	if errReader == nil {
+		return
+	}
 	if DebugMode {
 		go io.Copy(os.Stderr, errReader)
 	} else {
@@ -256,11 +259,12 @@ func setupDebug(errReader io.Reader) {
 }
 
 type receiveJob struct {
-	Type   transferType
-	Writer io.Writer
-	Path   string
-	Perm   os.FileMode
-	close  bool
+	Type      transferType
+	Writer    io.Writer
+	Path      string
+	Perm      os.FileMode
+	close     bool // close writer
+	recursive bool // recursive receive
 }
 
 func (c *Client) receiveFromRemote(job receiveJob, stream *sessionStream, finished chan<- struct{}, errCh chan<- error) {
@@ -279,9 +283,9 @@ func (c *Client) receiveFromRemote(job receiveJob, stream *sessionStream, finish
 
 	switch job.Type {
 	case file:
-		handleReceive(false, job, stream)
+		handleReceive(job, stream)
 	case directory:
-		handleReceive(true, job, stream)
+		handleReceive(job, stream)
 	default:
 		panicf("programmer error: unsupported receive type %q", job.Type)
 	}
@@ -291,7 +295,7 @@ func (c *Client) receiveFromRemote(job receiveJob, stream *sessionStream, finish
 	}
 }
 
-func handleReceive(recursive bool, recv receiveJob, stream *sessionStream) {
+func handleReceive(recv receiveJob, stream *sessionStream) {
 	var path []string
 	if len(recv.Path) > 0 {
 		path = append(path, recv.Path)
@@ -299,16 +303,25 @@ func handleReceive(recursive bool, recv receiveJob, stream *sessionStream) {
 
 	// signal the remote to start
 	sendResponse(stream.In, statusOK)
+	// a flag to indicate if first loop
+	firstLoop := true
 
 	for {
 		j := readTransaction(stream)
 
-		if !recursive && j.Type == directory {
+		if !recv.recursive && j.Type == directory {
 			sendResponse(stream.In, statusErr, "protocol error: directory received in non-recursive mode")
 		}
 
 		switch j.Type {
 		case directory:
+			// On the first loop. skip the root directory transfer
+			if firstLoop {
+				setTimestamp(stream.In, recv.Path, j.ModifiedTime, j.AccessTime)
+				sendResponse(stream.In, statusOK)
+				firstLoop = false
+				continue
+			}
 			path = append(path, j.Destination)
 			toOpen := filepath.Join(path...)
 			mkdir(stream.In, toOpen, j.Perm)
@@ -317,7 +330,7 @@ func handleReceive(recursive bool, recv receiveJob, stream *sessionStream) {
 			sendResponse(stream.In, statusOK)
 		case file:
 			// recursive recv
-			if len(path) >= 2 {
+			if recv.recursive && len(path) >= 1 && recv.Writer == nil {
 				toOpen := filepath.Join(append(path, j.Destination)...)
 				fd := openFile(stream.In, toOpen, j.Perm)
 				saveFile(fd, stream, j.Size, true)
@@ -342,13 +355,13 @@ func handleReceive(recursive bool, recv receiveJob, stream *sessionStream) {
 			}
 			// confirm recv ok
 			sendResponse(stream.In, statusOK)
-			if !recursive {
+			if !recv.recursive {
 				return
 			}
 		case exit:
 			sendResponse(stream.In, statusOK)
-			if recursive {
-				if l := len(path); l >= 3 {
+			if recv.recursive {
+				if l := len(path); l >= 2 {
 					// exit to parent directory
 					path = path[0 : l-1]
 				} else {
@@ -362,6 +375,9 @@ func handleReceive(recursive bool, recv receiveJob, stream *sessionStream) {
 			}
 		default:
 			sendResponse(stream.In, statusErr, "programmer error: unexpected receive transaction ", string(j.Type))
+		}
+		if firstLoop {
+			firstLoop = false
 		}
 	}
 }
@@ -425,9 +441,12 @@ func saveFile(w io.Writer, stream *sessionStream, size int64, close bool) {
 	readDelimiter(stream.Out, 0, 1)
 }
 
-func readTransaction(stream *sessionStream) transferJob {
+// read commands as a sendJob from remote
+func readTransaction(stream *sessionStream) sendJob {
+	// read the first command
 	c := readCommand(stream)
-	j := transferJob{}
+	j := sendJob{}
+	// read next if T command
 	if c.Type == timestamp {
 		sendResponse(stream.In, statusOK)
 		next := readCommand(stream)
@@ -441,7 +460,7 @@ func readTransaction(stream *sessionStream) transferJob {
 		case exit:
 			sendResponse(stream.In, statusErr, "protocol error: unexpected E after T")
 		default:
-			panicf("programmer error: impossible switch case")
+			panic("programmer error: impossible switch case")
 		}
 	} else {
 		j.Type, j.Destination = c.Type, c.Destination
@@ -475,16 +494,15 @@ var (
 func readCommand(stream *sessionStream) command {
 	defer func() {
 		if r := recover(); r != nil {
-			errStr := fmt.Sprintf("%s", r)
+			errStr := fmt.Sprintf("%v", r)
 			// if protocol error occurs.
 			// Send it back to remote server
 			if strings.HasPrefix(errStr, "protocol error") {
 				// sendResponse continue panic on Err
 				sendResponse(stream.In, statusErr, errStr)
-			} else {
-				// continue panic
-				panic(errStr)
 			}
+			// continue panic
+			panic(errStr)
 		}
 	}()
 
@@ -732,7 +750,7 @@ func checkResponse(stream *sessionStream) {
 	case statusOK:
 		// status OK, do nothing
 	default:
-		panicf("unknown server response status %d", st)
+		panicf("unknown server response status %s", st)
 	}
 }
 

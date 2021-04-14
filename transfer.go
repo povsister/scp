@@ -131,7 +131,7 @@ func (c *Client) CopyToRemote(reader io.Reader, remoteTarget string, opt *FileTr
 	defer session.Close()
 	defer stream.Close()
 
-	job := transferJob{
+	job := sendJob{
 		Type:         file,
 		Size:         size,
 		Reader:       reader,
@@ -229,8 +229,8 @@ func (c *Client) CopyDirToRemote(localDir string, remoteDir string, opt *DirTran
 // traverse iterates files and directories of fd in specific order.
 // Return a chan for jobs.
 // The fd will be automatically closed after read.
-func traverse(parentCtx context.Context, fd *os.File, opt *DirTransferOption, errCh chan error) (context.CancelFunc, <-chan transferJob) {
-	jobCh := make(chan transferJob, DirectoryPreReads)
+func traverse(parentCtx context.Context, fd *os.File, opt *DirTransferOption, errCh chan error) (context.CancelFunc, <-chan sendJob) {
+	jobCh := make(chan sendJob, DirectoryPreReads)
 
 	pCtx := context.TODO()
 	if parentCtx != nil {
@@ -243,7 +243,7 @@ func traverse(parentCtx context.Context, fd *os.File, opt *DirTransferOption, er
 	return cancel, jobCh
 }
 
-func traverseDir(ctx context.Context, rootDir bool, dir *os.File, opt *DirTransferOption, jobCh chan transferJob, errCh chan error) {
+func traverseDir(ctx context.Context, rootDir bool, dir *os.File, opt *DirTransferOption, jobCh chan sendJob, errCh chan error) {
 	if rootDir {
 		defer close(jobCh)
 	}
@@ -314,8 +314,8 @@ func traverseDir(ctx context.Context, rootDir bool, dir *os.File, opt *DirTransf
 }
 
 // deliver a directory transfer
-func deliverDir(ctx context.Context, stat os.FileInfo, opt *DirTransferOption, jobCh chan transferJob) {
-	j := transferJob{
+func deliverDir(ctx context.Context, stat os.FileInfo, opt *DirTransferOption, jobCh chan sendJob) {
+	j := sendJob{
 		Type:        directory,
 		Destination: stat.Name(),
 		Perm:        DefaultDirPerm,
@@ -339,8 +339,8 @@ func deliverDir(ctx context.Context, stat os.FileInfo, opt *DirTransferOption, j
 
 // deliver a file transfer job.
 // close the fd automatically.
-func deliverFile(ctx context.Context, fd *os.File, stat os.FileInfo, opt *DirTransferOption, jobCh chan transferJob) {
-	j := transferJob{
+func deliverFile(ctx context.Context, fd *os.File, stat os.FileInfo, opt *DirTransferOption, jobCh chan sendJob) {
+	j := sendJob{
 		Type:        file,
 		Size:        stat.Size(),
 		Reader:      fd,
@@ -504,10 +504,9 @@ func (c *Client) CopyFileFromRemote(remoteFile, localFile string, opt *FileTrans
 // CopyDirFromRemote recursively copies a remote directory into local directory.
 // The localDir must exist before copying.
 //
-//
 // For example:
 //   - CopyDirFromRemote("/remote/dir1", "/local/dir2", &DirTransferOption{})
-//     - Results: "remote/dir1" -> "/local/dir2/dir1"
+//     - Results: "remote/dir1/<contents>" -> "/local/dir2/<contents>"
 func (c *Client) CopyDirFromRemote(remoteDir, localDir string, opt *DirTransferOption) error {
 	if opt == nil {
 		return ErrNoTransferOption
@@ -535,8 +534,9 @@ func (c *Client) CopyDirFromRemote(remoteDir, localDir string, opt *DirTransferO
 
 	finished := make(chan struct{})
 	j := receiveJob{
-		Type: directory,
-		Path: localDir,
+		Type:      directory,
+		Path:      localDir,
+		recursive: true,
 	}
 	go c.receiveFromRemote(j, stream, finished, reusableErrCh)
 
