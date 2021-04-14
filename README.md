@@ -126,7 +126,7 @@ err:= scpClient.CopyDirToRemote("/path/to/local/dir", "/path/to/remote/dir", do)
 ### Recursively copy a directory from remote
 ```go
 // recursively copy from remote.
-// The remote dir will be save under "/path/to/local".
+// The content of remote dir will be save under "/path/to/local".
 err := scpClient.CopyDirFromRemote("/path/to/remote/dir", "/path/to/local", &scp.DirTransferOption{})
 ```
 
