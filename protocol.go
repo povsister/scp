@@ -75,7 +75,7 @@ type remoteServerOption struct {
 	Preserve  bool // preserve time and modes
 }
 
-func (c *Client) launchScpServerOnRemote(o remoteServerOption, s *ssh.Session, remotePath string, readyCh chan<- struct{}, errCh chan<- error) {
+func (c *Client) launchScpServerOnRemote(o remoteServerOption, s *ssh.Session, st *sessionStream, remotePath string, readyCh chan<- struct{}, errCh chan<- error) {
 	remoteExec := c.scpOpt.RemoteBinary
 	if c.scpOpt.Sudo && !c.isRootUser() {
 		remoteExec = fmt.Sprintf("sudo %s", c.scpOpt.RemoteBinary)
@@ -97,12 +97,37 @@ func (c *Client) launchScpServerOnRemote(o remoteServerOption, s *ssh.Session, r
 		errCh <- fmt.Errorf("error executing command %q on remote: %s", cmd, err)
 		return
 	}
+	<-remoteServerReady(o.Mode, st)
 	close(readyCh)
 	err = s.Wait()
 	if err != nil {
 		errCh <- fmt.Errorf("unexpected remote scp server failure: %s", err)
 		return
 	}
+}
+
+func remoteServerReady(mode scpServerMode, s *sessionStream) <-chan struct{} {
+	ch := make(chan struct{})
+	switch mode {
+	case scpLocalToRemote:
+		go func() {
+			defer func() {
+				// does not care about the panic msg.
+				recover()
+				close(ch)
+			}()
+			// read the first OK response from remote receiver server
+			checkResponse(s)
+		}()
+	case scpRemoteToLocal:
+		// for remote sending server.
+		// It doe not send back any thing until
+		// the first OK response is received.
+		close(ch)
+	default:
+		panicf("programmer error: unknown scpServerMode %q", mode)
+	}
+	return ch
 }
 
 type transferType string
@@ -165,11 +190,8 @@ func (c *Client) sendToRemote(cancel context.CancelFunc, jobs interface{}, strea
 
 	switch js := jobs.(type) {
 	case sendJob:
-		checkResponse(stream)
 		handleSend(js, stream)
 	case <-chan sendJob:
-		// confirm the first OK response
-		checkResponse(stream)
 		for {
 			j, ok := <-js
 			if !ok {
@@ -317,6 +339,7 @@ func handleReceive(recv receiveJob, stream *sessionStream) {
 		case directory:
 			// On the first loop. skip the root directory transfer
 			if firstLoop {
+				// The root directory should already exists
 				setTimestamp(stream.In, recv.Path, j.ModifiedTime, j.AccessTime)
 				sendResponse(stream.In, statusOK)
 				firstLoop = false

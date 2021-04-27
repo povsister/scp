@@ -390,7 +390,7 @@ func (c *Client) prepareTransfer(o remoteServerOption, remotePath string) (*ssh.
 	errCh := make(chan error, 3)
 	serverReady := make(chan struct{})
 
-	go c.launchScpServerOnRemote(o, session, remotePath, serverReady, errCh)
+	go c.launchScpServerOnRemote(o, session, stream, remotePath, serverReady, errCh)
 
 	t := time.NewTimer(10 * time.Second)
 	defer t.Stop()
