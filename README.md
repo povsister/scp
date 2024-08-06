@@ -137,6 +137,56 @@ err := scpClient.CopyDirToRemote("/path/to/local/dir", "/path/to/remote/dir", do
 err := scpClient.CopyDirFromRemote("/path/to/remote/dir", "/path/to/local", &scp.DirTransferOption{})
 ```
 
+### Filtering jobs
+```go
+// Defines an anonymous function for Passthrough that checks the
+// file size in the copy job. If the file size is greater than 1000
+// bytes, the function returns false, indicating that the job should
+// be rejected. Otherwise, the function returns true, allowing the
+// job to proceed.
+do := &scp.DirTransferOption{
+    Passthrough = func(pt Passthrough) (Passthrough, bool) {
+        if pt.Size > 1000 {
+            return pt, false // Reject large files
+        }
+        return pt, true // Accept the pt
+    }
+}
+err = scpClient.CopyDirToRemote("/path/to/local/dir", "/path/to/remote/dir", do)
+```
+
+### Progress
+```go
+// Defines an anonymous function for ReceivePassthrough that conf the
+// Writer attribute of ReceiveJob to track and display the upload 
+// progress. The new Writer writes data to the original writer, calculates
+// the upload progress, and prints it as a percentage.
+
+type Progress struct {
+    TotalSize int64
+    writed int
+}
+
+func (p *Progress) Write(p []byte) (n int, err error) {
+    p.writed = p.writed + len(p)
+    progress := float64(p.writed) / float64(p.TotalSize) * 100
+    fmt.Printf("progress: %.2f%%\n", progress)
+    return len(p), nil
+}
+
+func (p *Progress) Close() error {
+    return nil
+}
+
+do := &scp.DirTransferOption{
+    Passthrough = func(pt PassthroughCopy) (PassthroughCopy, bool) {
+        progress = Progress{TotalSize: pt.Size}
+        pt.Writer = progress
+    }
+}
+err = scpClient.CopyDirToRemote("/path/to/local/dir", "/path/to/remote/dir", do)
+```
+
 ## Something you need to know
 `SCP` is a light-weighted protocol which implements file transfer only. It does not support 
 advanced features like: directory listing, resume from break-point.
