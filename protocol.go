@@ -147,12 +147,13 @@ const (
 type sendJob struct {
 	Type         transferType
 	Size         int64
-	Reader       io.Reader // the content reader
-	Destination  string    // must be file or directory name. Path is not supported in send
-	Perm         os.FileMode
-	AccessTime   *time.Time // can be nil
-	ModifiedTime *time.Time // must be both set or nil with atime
-	close        bool       // close the reader after using it. internal usage.
+	Reader       io.Reader                                     // the content reader
+	Destination  string                                        // must be file or directory name. Path is not supported in send
+	Perm         os.FileMode                                   // file mode
+	AccessTime   *time.Time                                    // can be nil
+	ModifiedTime *time.Time                                    // must be both set or nil with atime
+	close        bool                                          // close the reader after using it. internal usage.
+	passthrough  func(PassthroughCopy) (PassthroughCopy, bool) // the passthrough config. internal usage.
 }
 
 var (
@@ -212,6 +213,22 @@ func (c *Client) sendToRemote(cancel context.CancelFunc, jobs interface{}, strea
 func handleSend(j sendJob, stream *sessionStream) {
 	switch j.Type {
 	case file:
+		var dstwriter io.Writer = stream.In
+		if j.passthrough != nil {
+			if ccnf, ok := j.passthrough(PassthroughCopy{
+				Type: PassthroughFile,
+				Size: j.Size,
+				Name: j.Destination,
+				Path: j.Destination,
+				Perm: j.Perm,
+			}); ok {
+				if ccnf.Writer != nil {
+					dstwriter = io.MultiWriter(dstwriter, ccnf.Writer)
+				}
+			} else {
+				return
+			}
+		}
 		// close if required
 		if j.close {
 			if rc, ok := j.Reader.(io.ReadCloser); ok {
@@ -229,7 +246,7 @@ func handleSend(j sendJob, stream *sessionStream) {
 		}
 		checkResponse(stream)
 		// send file
-		_, err = io.Copy(stream.In, j.Reader)
+		_, err = io.Copy(dstwriter, j.Reader)
 		if err != nil {
 			panicf("error sending file %q: %s", j.Destination, err)
 		}
@@ -240,6 +257,16 @@ func handleSend(j sendJob, stream *sessionStream) {
 		checkResponse(stream)
 
 	case directory:
+		if j.passthrough != nil {
+			if _, ok := j.passthrough(PassthroughCopy{
+				Type: PassthroughDirectory,
+				Size: j.Size,
+				Name: j.Destination,
+				Perm: j.Perm,
+			}); !ok {
+				return
+			}
+		}
 		if j.AccessTime != nil && j.ModifiedTime != nil {
 			sendTimestamp(j, stream)
 		}
@@ -281,12 +308,13 @@ func setupDebug(errReader io.Reader) {
 }
 
 type receiveJob struct {
-	Type      transferType
-	Writer    io.Writer
-	Path      string
-	Perm      os.FileMode
-	close     bool // close writer
-	recursive bool // recursive receive
+	Type        transferType
+	Writer      io.Writer
+	Path        string
+	Perm        os.FileMode
+	close       bool                                          // close writer
+	recursive   bool                                          // recursive receive
+	passthrough func(PassthroughCopy) (PassthroughCopy, bool) // the passthrough config. internal usage.
 }
 
 func (c *Client) receiveFromRemote(job receiveJob, stream *sessionStream, finished chan<- struct{}, errCh chan<- error) {
@@ -347,16 +375,45 @@ func handleReceive(recv receiveJob, stream *sessionStream) {
 			}
 			path = append(path, j.Destination)
 			toOpen := filepath.Join(path...)
+			if recv.passthrough != nil {
+				if _, ok := recv.passthrough(PassthroughCopy{
+					Type: PassthroughDirectory,
+					Size: j.Size,
+					Name: j.Destination,
+					Path: recv.Path,
+					Perm: j.Perm,
+				}); !ok {
+					return
+				}
+			}
 			mkdir(stream.In, toOpen, j.Perm)
 			setTimestamp(stream.In, toOpen, j.ModifiedTime, j.AccessTime)
 			// confirm D command
 			sendResponse(stream.In, statusOK)
 		case file:
+			var pstWriter io.Writer
+			if recv.passthrough != nil {
+				if ccnf, ok := recv.passthrough(PassthroughCopy{
+					Type: PassthroughFile,
+					Size: j.Size,
+					Name: j.Destination,
+					Path: j.Destination,
+					Perm: j.Perm,
+				}); ok {
+					pstWriter = ccnf.Writer
+				} else {
+					return
+				}
+			}
 			// recursive recv
 			if recv.recursive && len(path) >= 1 && recv.Writer == nil {
 				toOpen := filepath.Join(append(path, j.Destination)...)
 				fd := openFile(stream.In, toOpen, j.Perm)
-				saveFile(fd, stream, j.Size, true)
+				var ww io.Writer = fd
+				if pstWriter != nil {
+					ww = io.MultiWriter(ww, pstWriter)
+				}
+				saveFile(ww, stream, j.Size, true)
 				setTimestamp(stream.In, toOpen, j.ModifiedTime, j.AccessTime)
 			} else {
 				// single file transfer
@@ -370,7 +427,11 @@ func handleReceive(recv receiveJob, stream *sessionStream) {
 					}
 					recv.Writer = openFile(stream.In, recv.Path, perm)
 				}
-				saveFile(recv.Writer, stream, j.Size, recv.close)
+				ww := recv.Writer
+				if pstWriter != nil {
+					ww = io.MultiWriter(ww, pstWriter)
+				}
+				saveFile(ww, stream, j.Size, recv.close)
 				// if path is specified. Means its a file transfer.
 				if len(recv.Path) > 0 {
 					setTimestamp(stream.In, recv.Path, j.ModifiedTime, j.AccessTime)

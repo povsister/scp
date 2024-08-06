@@ -28,6 +28,30 @@ var (
 	DirectoryPreReads = 10
 )
 
+type PassthroughType string
+
+const (
+	// indicate a file transfer
+	PassthroughFile PassthroughType = "file"
+	// indicate a directory transfer
+	PassthroughDirectory PassthroughType = "directory"
+)
+
+type PassthroughCopy struct {
+	// Type of object, PassthroughFile or PassthroughDirectory
+	Type PassthroughType
+	// File size of file object in bytes.
+	Size int64
+	// A writer interface.
+	Writer io.Writer
+	// File name.
+	Name string
+	// Path of the object.
+	Path string
+	// File mode and permission bits
+	Perm os.FileMode
+}
+
 // FileTransferOption holds the transfer options for file.
 type FileTransferOption struct {
 	// Context for the file transfer.
@@ -50,6 +74,18 @@ type FileTransferOption struct {
 	// Default: 0 (Means no limit)
 	// TODO: not implemented yet
 	SpeedLimit int64
+	// Passthrough is a function that intercepts the PassthroughCopy,
+	// allowing manipulation of the job for purposes such as adding a progress bar or filtering files.
+	// It receives a PassthroughCopy and returns a modified PassthroughCopy and a boolean indicating whether the job
+	// should continue (true) or be rejected (false).
+	// Example usage:
+	// option.Passthrough = func(pth PassthroughCopy) (PassthroughCopy, bool) {
+	//     if pth.Size > 1000 {
+	//         return pth, false // Reject large files
+	//     }
+	//     return pth, true // Accept the pth
+	// }
+	Passthrough func(PassthroughCopy) (PassthroughCopy, bool)
 }
 
 // KnownSize is intended for reader whose size is already known before reading.
@@ -81,6 +117,7 @@ func (c *Client) CopyFileToRemote(localFile string, remoteLoc string, opt *FileT
 //   - *os.File
 //   - *strings.Reader
 //   - *bytes.Reader
+//
 // Note that the last part of remoteTarget will be used as filename if unspecified.
 //
 // It's CALLER'S responsibility to CLOSE the file if an *os.File is supplied.
@@ -139,6 +176,7 @@ func (c *Client) CopyToRemote(reader io.Reader, remoteTarget string, opt *FileTr
 		Perm:         perm,
 		AccessTime:   atime,
 		ModifiedTime: mtime,
+		passthrough:  opt.Passthrough,
 	}
 
 	finished := make(chan struct{})
@@ -183,6 +221,18 @@ type DirTransferOption struct {
 	// only transfers the source directory's contents.
 	// Default: false
 	ContentOnly bool
+	// Passthrough is a function that intercepts the PassthroughCopy,
+	// allowing manipulation of the job for purposes such as adding a progress bar or filtering files.
+	// It receives a PassthroughCopy and returns a modified PassthroughCopy and a boolean indicating whether the job
+	// should continue (true) or be rejected (false).
+	// Example usage:
+	// option.Passthrough = func(pth PassthroughCopy) (PassthroughCopy, bool) {
+	//     if pth.Size > 1000 {
+	//         return pth, false // Reject large files
+	//     }
+	//     return pth, true // Accept the pth
+	// }
+	Passthrough func(PassthroughCopy) (PassthroughCopy, bool)
 }
 
 // CopyDirToRemote recursively copies a directory to remoteDir.
@@ -325,6 +375,7 @@ func deliverDir(ctx context.Context, stat os.FileInfo, opt *DirTransferOption, j
 		Type:        directory,
 		Destination: stat.Name(),
 		Perm:        DefaultDirPerm,
+		passthrough: opt.Passthrough,
 	}
 	if opt.PreserveProp {
 		// directory permission bit not available on windows
@@ -353,6 +404,7 @@ func deliverFile(ctx context.Context, fd *os.File, stat os.FileInfo, opt *DirTra
 		Destination: stat.Name(),
 		Perm:        DefaultFilePerm,
 		close:       true,
+		passthrough: opt.Passthrough,
 	}
 	if opt.PreserveProp {
 		j.Perm = stat.Mode()
@@ -440,11 +492,12 @@ func (c *Client) copyFromRemote(remoteFile, localFile string, lw io.Writer, opt 
 
 	finished := make(chan struct{})
 	j := receiveJob{
-		Type:   file,
-		Path:   localFile,
-		Writer: lw,
-		Perm:   opt.Perm,
-		close:  len(localFile) != 0,
+		Type:        file,
+		Path:        localFile,
+		Writer:      lw,
+		Perm:        opt.Perm,
+		close:       len(localFile) != 0,
+		passthrough: opt.Passthrough,
 	}
 	go c.receiveFromRemote(j, stream, finished, reusableErrCh)
 
