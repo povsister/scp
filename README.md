@@ -158,7 +158,7 @@ err = scpClient.CopyDirToRemote("/path/to/local/dir", "/path/to/remote/dir", do)
 ### Progress
 ```go
 // Defines an anonymous function for ReceivePassthrough that conf the
-// Writer attribute of ReceiveJob to track and display the upload 
+// Writer attribute of PassthroughCopy to track and display the upload 
 // progress. The new Writer writes data to the original writer, calculates
 // the upload progress, and prints it as a percentage.
 
@@ -180,7 +180,7 @@ func (p *Progress) Close() error {
 
 do := &scp.DirTransferOption{
     Passthrough = func(pt PassthroughCopy) (PassthroughCopy, bool) {
-        progress = Progress{TotalSize: pt.Size}
+        progress = &Progress{TotalSize: pt.Size}
         pt.Writer = progress
     }
 }
