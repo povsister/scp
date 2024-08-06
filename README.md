@@ -137,6 +137,41 @@ err := scpClient.CopyDirToRemote("/path/to/local/dir", "/path/to/remote/dir", do
 err := scpClient.CopyDirFromRemote("/path/to/remote/dir", "/path/to/local", &scp.DirTransferOption{})
 ```
 
+### Progress
+```go
+// Defines an anonymous function for ReceivePassthrough that conf the
+// Writer attribute of PassthroughCopy to track and display the upload 
+// progress. The new Writer writes data to the original writer, calculates
+// the upload progress, and prints it as a percentage.
+
+type Progress struct {
+    TotalSize int64
+    Writed int
+}
+
+func (p *Progress) Draw(n) () {
+    p.Writed = n
+    progress := float64(p.writed) / float64(p.TotalSize) * 100
+    fmt.Printf("progress: %.2f%%\n", progress)
+}
+
+func (p *Progress) Close() error {
+    return nil
+}
+
+var bar *Progress
+do := &scp.DirTransferOption{
+    ObserverCallback: func(oet scp.ObserveEventType, ti scp.TransferInfo) {
+      if oet == scp.ObserveEventStart {
+        bar = &Progress{TotalSize: ti.TotalSize()}
+        return
+      }
+      bar.Draw(ti.TransferredSize())
+    },
+}
+err = scpClient.CopyDirToRemote("/path/to/local/dir", "/path/to/remote/dir", do)
+```
+
 ## Something you need to know
 `SCP` is a light-weighted protocol which implements file transfer only. It does not support 
 advanced features like: directory listing, resume from break-point.

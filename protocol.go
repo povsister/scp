@@ -3,6 +3,7 @@ package scp
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -22,14 +24,195 @@ var (
 	DebugMode = false
 )
 
+var MIN_BUFFSIZE int64 = 32 * 1024   // 32kB, the common buffsize
+var MAX_BUFFSIZE int64 = 1024 * 1024 // 1MB for small size transfer improvements
+
+var ErrInvalidWrite = errors.New("invalid write result")
+
+// copyWithCallback function is an adaptation of io.copyBuffer designed to
+// fit the specific requirement of making callback calls to report the
+// progress of data transfer. This method reads data from the src reader
+// and writes it to the dst writer using the provided buffer buf. During
+// the transfer, it triggers callbacks to provide updates on the progress,
+// allowing for real-time monitoring of the data being transmitted. The
+// function returns the total number of bytes successfully written and an
+// error if one occurs during the operation.
+func copyWithCallback(dst io.Writer, src io.Reader, buf []byte, cb func(n int64)) (written int64, err error) {
+	for {
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := dst.Write(buf[0:nr])
+			if nw < 0 || nr < nw {
+				nw = 0
+				if ew == nil {
+					// the Writer did not return err but
+					// the writen bytes is more than
+					// readed bytes :O
+					ew = ErrInvalidWrite
+				}
+			}
+
+			// Update written bytes and callback
+			written += int64(nw)
+			// callback written bytes
+			cb(written)
+
+			// on write err, stop write
+			if ew != nil {
+				err = ew
+				break
+			}
+
+			// on read/write inconsistency, stop write
+			if nr != nw {
+				err = io.ErrShortWrite
+				break
+			}
+		}
+
+		// on read error, stop write
+		if er != nil {
+			if er != io.EOF {
+				err = er
+			}
+			break
+		}
+	}
+
+	return written, err
+}
+
+// streamTransferInfo is an Implementation of TransferInfo interface
+type streamTransferInfo struct {
+	name            string
+	path            string
+	totalSize       int64
+	transferredSize int64
+	lastUpdate      time.Time
+	err             error
+}
+
+func (i *streamTransferInfo) Name() string {
+	return i.name
+}
+
+func (i *streamTransferInfo) Path() string {
+	return i.path
+}
+
+func (i *streamTransferInfo) TotalSize() int64 {
+	return i.totalSize
+}
+
+func (i *streamTransferInfo) TransferredSize() int64 {
+	return i.transferredSize
+}
+
+func (i *streamTransferInfo) LastUpdate() time.Time {
+	return i.lastUpdate
+}
+
+func (i *streamTransferInfo) Err() error {
+	return i.err
+}
+
 type sessionStream struct {
-	In     io.WriteCloser
-	Out    io.Reader
-	ErrOut io.Reader
+	In               io.WriteCloser
+	Out              io.Reader
+	ErrOut           io.Reader
+	observerCallback func(ObserveEventType, TransferInfo)
+	mu               sync.Mutex
 }
 
 func (s *sessionStream) Close() error {
 	return s.In.Close()
+}
+
+// get function reads data from s.In and writes it to the w writer,
+// taking into account the ti.TotalSize attribute to limit the reading
+// to the exact size of the file being transferred. This ensures that
+// only the specified amount of data is read and written, preventing
+// any excess data from being processed. The function returns the total
+// number of bytes successfully transferred (n) and an error (err) if
+// any issues occur during the operation.
+func (s *sessionStream) get(w io.Writer, ti *streamTransferInfo) (n int64, err error) {
+	var buf []byte
+	// for small file sizes a bigger bufer improves the performance
+	if ti.totalSize < MAX_BUFFSIZE {
+		buf = make([]byte, MAX_BUFFSIZE)
+	} else {
+		buf = make([]byte, MIN_BUFFSIZE)
+	}
+	go s.callbackTransferStart(ti)
+	n, err = copyWithCallback(w, io.LimitReader(s.Out, ti.totalSize), buf, func(wb int64) { go s.callbackTransferTick(ti, wb) })
+	go s.callbackTransferEnd(ti, err)
+	return n, err
+}
+
+// similar to get
+func (s *sessionStream) put(r io.Reader, ti *streamTransferInfo) (n int64, err error) {
+	var buf []byte
+	// for small file sizes a bigger bufer improves the performance
+	if ti.totalSize < MAX_BUFFSIZE {
+		buf = make([]byte, MAX_BUFFSIZE)
+	} else {
+		buf = make([]byte, MIN_BUFFSIZE)
+	}
+	go s.callbackTransferStart(ti)
+	n, err = copyWithCallback(s.In, r, buf, func(wb int64) { go s.callbackTransferTick(ti, wb) })
+	go s.callbackTransferEnd(ti, err)
+	return n, err
+}
+
+// setObserverCallback function allows setting a callback function (cb)
+// that will be invoked during specific events related to file transfers.
+// This callback is triggered at the start and end of a file transfer, as
+// well as periodically during the transfer to report progress. The callback
+// function receives an ObserveEventType, which indicates the type of event
+// (e.g., start, tick, end), and TransferInfo, which contains details about
+// the transfer. This setup enables real-time monitoring and handling of
+// file transfer events.
+func (s *sessionStream) setObserverCallback(cb func(ObserveEventType, TransferInfo)) {
+	s.observerCallback = cb
+}
+
+func (s *sessionStream) callbackTransferStart(ti *streamTransferInfo) {
+	if s.observerCallback == nil {
+		return
+	}
+	// because we are calling callbacks funcs in go routines, a sysnc is
+	// needed to prevent race conditions betweeen callbacks
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	roti := *ti
+	s.observerCallback(ObserveEventStart, &roti)
+}
+
+func (s *sessionStream) callbackTransferTick(ti *streamTransferInfo, n int64) {
+	if s.observerCallback == nil {
+		return
+	}
+	// because we are calling callbacks funcs in go routines, a sysnc is
+	// needed to prevent race conditions betweeen callbacks
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ti.transferredSize = n
+	ti.lastUpdate = time.Now()
+	roti := *ti // read only copy of ti
+	s.observerCallback(ObserveEventTick, &roti)
+}
+
+func (s *sessionStream) callbackTransferEnd(ti *streamTransferInfo, err error) {
+	if s.observerCallback == nil {
+		return
+	}
+	// because we are calling callbacks funcs in go routines, a sysnc is
+	// needed to prevent race conditions betweeen callbacks
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ti.err = err
+	roti := *ti
+	s.observerCallback(ObserveEventEnd, &roti)
 }
 
 func (c *Client) sessionAndStream() (*ssh.Session, *sessionStream, error) {
@@ -229,7 +412,13 @@ func handleSend(j sendJob, stream *sessionStream) {
 		}
 		checkResponse(stream)
 		// send file
-		_, err = io.Copy(stream.In, j.Reader)
+		_, err = stream.put(j.Reader, &streamTransferInfo{
+			name:            filepath.Base(j.Destination),
+			path:            j.Destination,
+			totalSize:       j.Size,
+			transferredSize: 0,
+			lastUpdate:      time.Now(),
+		})
 		if err != nil {
 			panicf("error sending file %q: %s", j.Destination, err)
 		}
@@ -356,7 +545,13 @@ func handleReceive(recv receiveJob, stream *sessionStream) {
 			if recv.recursive && len(path) >= 1 && recv.Writer == nil {
 				toOpen := filepath.Join(append(path, j.Destination)...)
 				fd := openFile(stream.In, toOpen, j.Perm)
-				saveFile(fd, stream, j.Size, true)
+				saveFile(fd, stream, &streamTransferInfo{
+					name:            filepath.Base(j.Destination),
+					path:            toOpen,
+					totalSize:       j.Size,
+					transferredSize: 0,
+					lastUpdate:      time.Now(),
+				}, true)
 				setTimestamp(stream.In, toOpen, j.ModifiedTime, j.AccessTime)
 			} else {
 				// single file transfer
@@ -370,7 +565,13 @@ func handleReceive(recv receiveJob, stream *sessionStream) {
 					}
 					recv.Writer = openFile(stream.In, recv.Path, perm)
 				}
-				saveFile(recv.Writer, stream, j.Size, recv.close)
+				saveFile(recv.Writer, stream, &streamTransferInfo{
+					name:            filepath.Base(recv.Path),
+					path:            recv.Path,
+					totalSize:       j.Size,
+					transferredSize: 0,
+					lastUpdate:      time.Now(),
+				}, recv.close)
 				// if path is specified. Means its a file transfer.
 				if len(recv.Path) > 0 {
 					setTimestamp(stream.In, recv.Path, j.ModifiedTime, j.AccessTime)
@@ -439,7 +640,7 @@ func setTimestamp(w io.Writer, path string, mtime, atime *time.Time) {
 
 // saveFile saves the file received to io.Writer.
 // It will first confirm the command C and then start recv
-func saveFile(w io.Writer, stream *sessionStream, size int64, close bool) {
+func saveFile(w io.Writer, stream *sessionStream, ti *streamTransferInfo, close bool) {
 	defer func() {
 		if close {
 			if rc, ok := w.(io.ReadCloser); ok {
@@ -454,12 +655,12 @@ func saveFile(w io.Writer, stream *sessionStream, size int64, close bool) {
 	// confirm C command and starting transfer
 	sendResponse(stream.In, statusOK)
 
-	n, err := io.CopyN(w, stream.Out, size)
+	// stream.get() will take care about size using
+	// ti.TotalSize ErrInvalidWrite or ErrShortWrite
+	// will be returned on transfer inconsistency
+	_, err := stream.get(w, ti)
 	if err != nil {
 		panicf("error reading file from remote: %s", err)
-	}
-	if n != size {
-		panicf("excepting file length %d, but got %d", size, n)
 	}
 	readDelimiter(stream.Out, 0, 1)
 }
