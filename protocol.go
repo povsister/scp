@@ -160,6 +160,7 @@ func (s *sessionStream) get(w io.Writer, ti *streamTransferInfo) (n int64, err e
 	}()
 	n, err = copyWithCallback(w, io.LimitReader(s.Out, ti.totalSize), buf, func(wb int64) { go func() { tk <- wb }() })
 	c <- struct{}{}
+	s.callbackTransferTick(ti, n)
 	s.callbackTransferEnd(ti, err)
 	return n, err
 }
@@ -189,6 +190,7 @@ func (s *sessionStream) put(r io.Reader, ti *streamTransferInfo) (n int64, err e
 	}()
 	n, err = copyWithCallback(s.In, r, buf, func(wb int64) { go func() { tk <- wb }() })
 	c <- struct{}{}
+	s.callbackTransferTick(ti, n)
 	s.callbackTransferEnd(ti, err)
 	return n, err
 }
