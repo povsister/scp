@@ -38,6 +38,7 @@ var ErrInvalidWrite = errors.New("invalid write result")
 // function returns the total number of bytes successfully written and an
 // error if one occurs during the operation.
 func copyWithCallback(dst io.Writer, src io.Reader, buf []byte, cb func(n int64)) (written int64, err error) {
+	cb(0)
 	for {
 		nr, er := src.Read(buf)
 		if nr > 0 {
@@ -143,9 +144,23 @@ func (s *sessionStream) get(w io.Writer, ti *streamTransferInfo) (n int64, err e
 	} else {
 		buf = make([]byte, MIN_BUFFSIZE)
 	}
-	go s.callbackTransferStart(ti)
-	n, err = copyWithCallback(w, io.LimitReader(s.Out, ti.totalSize), buf, func(wb int64) { go s.callbackTransferTick(ti, wb) })
-	go s.callbackTransferEnd(ti, err)
+
+	s.callbackTransferStart(ti)
+	c := make(chan struct{})
+	tk := make(chan int64, 100)
+	go func() {
+		for {
+			select {
+			case wb := <-tk:
+				s.callbackTransferTick(ti, wb)
+			case <-c:
+				return
+			}
+		}
+	}()
+	n, err = copyWithCallback(w, io.LimitReader(s.Out, ti.totalSize), buf, func(wb int64) { go func() { tk <- wb }() })
+	c <- struct{}{}
+	s.callbackTransferEnd(ti, err)
 	return n, err
 }
 
@@ -158,9 +173,23 @@ func (s *sessionStream) put(r io.Reader, ti *streamTransferInfo) (n int64, err e
 	} else {
 		buf = make([]byte, MIN_BUFFSIZE)
 	}
-	go s.callbackTransferStart(ti)
-	n, err = copyWithCallback(s.In, r, buf, func(wb int64) { go s.callbackTransferTick(ti, wb) })
-	go s.callbackTransferEnd(ti, err)
+
+	s.callbackTransferStart(ti)
+	c := make(chan struct{})
+	tk := make(chan int64, 100)
+	go func() {
+		for {
+			select {
+			case wb := <-tk:
+				s.callbackTransferTick(ti, wb)
+			case <-c:
+				return
+			}
+		}
+	}()
+	n, err = copyWithCallback(s.In, r, buf, func(wb int64) { go func() { tk <- wb }() })
+	c <- struct{}{}
+	s.callbackTransferEnd(ti, err)
 	return n, err
 }
 
