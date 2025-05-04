@@ -28,6 +28,33 @@ var (
 	DirectoryPreReads = 10
 )
 
+type ObserveEventType string
+
+const (
+	ObserveEventStart ObserveEventType = "start"
+	ObserveEventTick  ObserveEventType = "tick"
+	ObserveEventEnd   ObserveEventType = "end"
+)
+
+// TransferInfo provides detailed information about a file transfer operation,
+// allowing access to key attributes such as the file name, path, total size,
+// amount of data transferred, last update time, and any errors that may have
+// occurred during the transfer.
+type TransferInfo interface {
+	// Name returns the name of the file being transferred.
+	Name() string
+	// Path returns the full path of the file in the system.
+	Path() string
+	// TotalSize returns the total size of the file in bytes.
+	TotalSize() int64
+	// TransferredSize returns the number of bytes that have been transferred so far.
+	TransferredSize() int64
+	// LastUpdate returns a time.Time object indicating when the transfer information was last updated.
+	LastUpdate() time.Time
+	// Err returns an error if any issue occurred during the transfer; otherwise, it returns nil.
+	Err() error
+}
+
 // FileTransferOption holds the transfer options for file.
 type FileTransferOption struct {
 	// Context for the file transfer.
@@ -50,6 +77,13 @@ type FileTransferOption struct {
 	// Default: 0 (Means no limit)
 	// TODO: not implemented yet
 	SpeedLimit int64
+	// ObserverCallback is an anonymous function that is called during different events in a file transfer.
+	// It is invoked at the start of the transfer with ObserveEventType set to ObserveEventStart,
+	// at the end of the transfer with ObserveEventType set to ObserveEventEnd,
+	// and periodically during the transfer with ObserveEventType set to ObserveEventTick.
+	// The TransferInfo object passed to the function contains information about the transfer,
+	// such as the file name, size, and the amount of data transferred so far.
+	ObserverCallback func(ObserveEventType, TransferInfo)
 }
 
 // KnownSize is intended for reader whose size is already known before reading.
@@ -131,6 +165,7 @@ func (c *Client) CopyToRemote(reader io.Reader, remoteTarget string, opt *FileTr
 	}
 	defer session.Close()
 	defer stream.Close()
+	stream.setObserverCallback(opt.ObserverCallback)
 
 	job := sendJob{
 		Type:         file,
@@ -184,6 +219,13 @@ type DirTransferOption struct {
 	// only transfers the source directory's contents.
 	// Default: false
 	ContentOnly bool
+	// ObserverCallback is an anonymous function that is called during different events in a file transfer.
+	// It is invoked at the start of the transfer with ObserveEventType set to ObserveEventStart,
+	// at the end of the transfer with ObserveEventType set to ObserveEventEnd,
+	// and periodically during the transfer with ObserveEventType set to ObserveEventTick.
+	// The TransferInfo object passed to the function contains information about the transfer,
+	// such as the file name, size, and the amount of data transferred so far.
+	ObserverCallback func(ObserveEventType, TransferInfo)
 }
 
 // CopyDirToRemote recursively copies a directory to remoteDir.
@@ -207,6 +249,7 @@ func (c *Client) CopyDirToRemote(localDir string, remoteDir string, opt *DirTran
 	}
 	defer session.Close()
 	defer stream.Close()
+	stream.setObserverCallback(opt.ObserverCallback)
 
 	cancelSend, jobCh := traverse(opt.Context, dir, opt, reusableErrCh)
 	defer cancelSend() // ensure no goroutine leak
@@ -539,6 +582,7 @@ func (c *Client) CopyDirFromRemote(remoteDir, localDir string, opt *DirTransferO
 	}
 	defer session.Close()
 	defer stream.Close()
+	stream.setObserverCallback(opt.ObserverCallback)
 
 	finished := make(chan struct{})
 	j := receiveJob{
