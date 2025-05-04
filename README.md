@@ -43,7 +43,7 @@ go get github.com/povsister/scp
 
 This package leverages `golang.org/x/crypto/ssh` to establish a SSH connection to remote host.
 
-*Error handling are omitted in examples!*
+**Error handling are omitted in examples!**
 
 ### Copy a file to remote
 ```go
@@ -51,7 +51,7 @@ This package leverages `golang.org/x/crypto/ssh` to establish a SSH connection t
 sshConf := scp.NewSSHConfigFromPassword("username", "password")
 
 // Build a SSH config from private key
-privPEM, err := ioutil.ReadFile("/path/to/privateKey")
+privPEM, err := os.ReadFile("/path/to/privateKey")
 // without passphrase
 sshConf, err := scp.NewSSHConfigFromPrivateKey("username", privPEM)
 // with passphrase
@@ -64,7 +64,6 @@ scpClient, err := scp.NewClient("my.server.com", sshConf, &scp.ClientOption{})
 
 // Build a SCP client based on existing "golang.org/x/crypto/ssh.Client"
 scpClient, err := scp.NewClientFromExistingSSH(existingSSHClient, &scp.ClientOption{})
-
 defer scpClient.Close()
 
 
@@ -97,7 +96,7 @@ buffer := []byte("something excited")
 reader := bytes.NewReader(buffer)
 
 // From fd
-// Note that its YOUR responsibility to CLOSE the fd after transfer.
+// Note that it's YOUR responsibility to CLOSE the fd after transfer.
 reader, err := os.Open("/path/to/local/file")
 defer reader.Close()
 

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -35,7 +34,7 @@ func fifoSession() (s1, s2 *sessionStream) {
 }
 
 func discardBytes(r io.Reader, n int64) {
-	_, _ = io.CopyN(ioutil.Discard, r, n)
+	_, _ = io.CopyN(io.Discard, r, n)
 }
 
 func TestBufferSendRecv(t *testing.T) {
@@ -326,7 +325,7 @@ func read(path string) ([]byte, os.FileInfo, error) {
 	if fi.IsDir() {
 		return nil, fi, nil
 	}
-	rd, err := ioutil.ReadAll(fd)
+	rd, err := io.ReadAll(fd)
 	if err != nil {
 		return nil, nil, err
 	}
