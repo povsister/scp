@@ -136,6 +136,17 @@ err := scpClient.CopyDirToRemote("/path/to/local/dir", "/path/to/remote/dir", do
 err := scpClient.CopyDirFromRemote("/path/to/remote/dir", "/path/to/local", &scp.DirTransferOption{})
 ```
 
+### Creating Remote Folders
+
+```go
+// SCP only creates folder when used in directory mode.
+// When working with individual files you can create a folder
+// via SSH remote command execution.
+sess, err := scpClient.NewSession()
+err = sess.Run("mkdir -p /path/at")
+err = scpClient.CopyFileToRemote("/path/to/local/file", "/path/at/remote", &scp.FileTransferOption{})
+```
+
 ## Something you need to know
 `SCP` is a light-weighted protocol which implements file transfer only. It does not support 
 advanced features like: directory listing, resume from break-point.
